@@ -74,16 +74,23 @@ REMOTE_CMDS
 
 # --- Transfer project files ---
 log "Transferring project files..."
-rsync -avz -e "ssh -i $SSH_KEY" --exclude '.git' "./$REPO_NAME/" "$REMOTE_USER@$REMOTE_IP:~/$REPO_NAME/"
+rsync -avz -e "ssh -i $SSH_KEY" --exclude '.git' "./$REPO_NAME/" "$REMOTE_USER@$REMOTE_IP:~/$REPO_NAME"
 
 # --- Deploy Docker container ---
 log "Deploying Docker container..."
-ssh -i "$SSH_KEY" "$REMOTE_USER@$REMOTE_IP" APP_PORT=$APP_PORT REPO_NAME=$REPO_NAME bash -c '
+ssh -i "$SSH_KEY" "$REMOTE_USER@$REMOTE_IP" "APP_PORT=$APP_PORT REPO_NAME='$REPO_NAME' bash -s" << 'REMOTE_DEPLOY_SCRIPT'
 set -e
+echo "Checking remote structure..."
+echo "HOME: $HOME"
+echo "REPO_NAME: $REPO_NAME"
+
 REMOTE_APP_DIR="$HOME/$REPO_NAME/app"
+echo "Looking for app in: $REMOTE_APP_DIR"
 
 if [ ! -d "$REMOTE_APP_DIR" ]; then
     echo "❌ Remote app directory $REMOTE_APP_DIR does not exist!"
+    echo "Available directories in $HOME:"
+    ls -la "$HOME"
     exit 1
 fi
 
@@ -91,13 +98,17 @@ cd "$REMOTE_APP_DIR"
 
 if [ ! -f Dockerfile ]; then
     echo "❌ Dockerfile not found in $REMOTE_APP_DIR"
+    echo "Contents of $REMOTE_APP_DIR:"
+    ls -la
     exit 1
 fi
 
 # Build Docker image
+echo "Building Docker image..."
 docker build -t hng-app .
 
 # Stop and remove existing container if exists
+echo "Stopping and removing existing container..."
 if docker ps -q --filter "name=hng-app" | grep -q .; then docker stop hng-app; fi
 if docker ps -aq --filter "name=hng-app" | grep -q .; then docker rm hng-app; fi
 
@@ -105,29 +116,31 @@ if docker ps -aq --filter "name=hng-app" | grep -q .; then docker rm hng-app; fi
 docker image prune -f
 
 # Run container
+echo "Starting container..."
 docker run -d --name hng-app -p $APP_PORT:$APP_PORT hng-app
-'
+echo "✅ Container deployed successfully!"
+REMOTE_DEPLOY_SCRIPT
 
 # --- Configure Nginx reverse proxy ---
 log "Configuring Nginx reverse proxy..."
-ssh -i "$SSH_KEY" "$REMOTE_USER@$REMOTE_IP" APP_PORT=$APP_PORT bash -c '
-sudo tee /etc/nginx/sites-available/hng-app.conf > /dev/null <<NGINX
+ssh -i "$SSH_KEY" "$REMOTE_USER@$REMOTE_IP" "APP_PORT=$APP_PORT" 'bash -s' << 'NGINX_SCRIPT'
+sudo tee /etc/nginx/sites-available/hng-app.conf > /dev/null <<EOF
 server {
     listen 80;
     server_name _;
 
     location / {
-        proxy_pass http://127.0.0.1:'"$APP_PORT"';
+        proxy_pass http://127.0.0.1:$APP_PORT;
         proxy_set_header Host \$host;
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
     }
 }
-NGINX
+EOF
 
 sudo ln -sf /etc/nginx/sites-available/hng-app.conf /etc/nginx/sites-enabled/hng-app.conf
 sudo nginx -t && sudo systemctl reload nginx
-'
+NGINX_SCRIPT
 
 # --- Validate deployment ---
 log "Validating deployment..."
